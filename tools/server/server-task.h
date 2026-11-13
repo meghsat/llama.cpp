@@ -126,9 +126,9 @@ struct task_params {
     // Embeddings
     int32_t embd_normalize = 2; // (-1=none, 0=max absolute int16, 1=taxicab, 2=Euclidean/L2, >2=p-norm)
 
-    // with --pooling none: one mean vector per group instead of one vector per token
-    // each group is a list of [start, end) token positions
-    std::vector<std::vector<std::pair<int32_t, int32_t>>> pool_groups;
+    // "pool_groups" with --pooling none: the group of each prompt position (-1 = none) and the size of each group
+    std::vector<int32_t> pool_group_of_pos;
+    std::vector<int32_t> pool_group_n_tokens;
 
     json format_logit_bias(const std::vector<llama_logit_bias> & logit_bias) const;
     json to_json(bool only_metrics = false) const;

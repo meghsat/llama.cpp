@@ -769,6 +769,15 @@ This endpoint also supports multimodal embeddings. See the documentation for the
    2: Euclidean/L2
   >2: P-Norm
 ```
+With `pool_groups`, this applies to each group mean.
+
+`pool_groups`: Return one mean vector per group of tokens, not one vector per token. Requires `--pooling none`. Each group is a list of `[start, end)` ranges of token positions in the prompt. Positions include the tokens that the server adds, for example BOS. Use `/tokenize` with `"add_special": true` to find them. A position can be in one range only. The response has one vector per group, in the order of the groups. `embd_normalize` applies to each mean. Not supported with more than one prompt or with media.
+
+Example: the mean of tokens 1-2 and the mean of tokens 3 and 5-6:
+```json
+{"content": "...", "pool_groups": [[[1, 3]], [[3, 4], [5, 7]]], "embd_normalize": -1}
+```
+Response: `[{"index": 0, "embedding": [[...], [...]]}]`
 
 ### POST `/reranking`: Rerank documents according to a given query
 

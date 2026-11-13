@@ -204,3 +204,23 @@ def test_vision_embeddings_oai_content():
     # same prompt and image in both formats
     assert data[0]["embedding"] == data[1]["embedding"]
     assert data[0]["embedding"] != data[2]["embedding"]
+
+
+def test_vision_embeddings_pool_groups():
+    global server
+    server.server_embeddings = True
+    server.pooling = 'none'
+    server.n_batch = 512
+    server.start()
+    res = server.make_request("POST", "/embedding", data={
+        "content": {JSON_PROMPT_STRING_KEY: "What is this: <__media__>\n", JSON_MULTIMODAL_KEY: [get_img_url("IMG_BASE64_0")]},
+        "pool_groups": [[[0, 2]]],
+    })
+    assert res.status_code == 400
+    # text-only content on a multimodal server is still accepted
+    res = server.make_request("POST", "/embedding", data={
+        "content": {"content": [{"type": "text", "text": "What is this:"}]},
+        "pool_groups": [[[0, 2]]],
+    })
+    assert res.status_code == 200
+    assert len(res.body[0]["embedding"]) == 1
