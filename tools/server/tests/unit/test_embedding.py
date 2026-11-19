@@ -362,7 +362,6 @@ def test_embedding_pool_groups():
     res = server.make_request("POST", "/embedding", data={
         "content": POOL_GROUPS_PROMPT,
         "pool_groups": groups,
-        "embd_normalize": -1,
     })
     assert res.status_code == 200
     means = res.body[0]['embedding']
@@ -381,6 +380,7 @@ def test_embedding_pool_groups_normalized():
     res = server.make_request("POST", "/embedding", data={
         "content": POOL_GROUPS_PROMPT,
         "pool_groups": [[[1, 3]], [[3, 6]]],
+        "embd_normalize": 2,
     })
     assert res.status_code == 200
     for mean in res.body[0]['embedding']:

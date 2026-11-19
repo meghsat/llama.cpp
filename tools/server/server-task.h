@@ -128,10 +128,6 @@ struct task_params {
     // Embeddings
     int32_t embd_normalize = 2; // (-1=none, 0=max absolute int16, 1=taxicab, 2=Euclidean/L2, >2=p-norm)
 
-    // "pool_groups" with --pooling none: the group of each prompt position (-1 = none) and the size of each group
-    std::vector<int32_t> pool_group_of_pos;
-    std::vector<int32_t> pool_group_n_tokens;
-
     json format_logit_bias(const std::vector<llama_logit_bias> & logit_bias) const;
     json to_json(bool only_metrics = false) const;
 };
@@ -165,6 +161,12 @@ struct task_result_state {
         bool is_partial,
         std::vector<common_chat_msg_diff> & diffs,
         bool filter_tool_calls = false);
+};
+
+// "pool_groups" of an embedding task with --pooling none
+struct server_pool_groups {
+    std::vector<int32_t> group_of_pos; // group of each prompt position, -1 if none
+    std::vector<int32_t> n_tokens;     // number of tokens in each group
 };
 
 struct server_task {
@@ -247,6 +249,9 @@ struct server_task {
         std::vector<int32_t> group;
     };
     decision decision;
+
+    // used by SERVER_TASK_TYPE_EMBEDDING
+    server_pool_groups pool_groups;
 
     // used by SERVER_TASK_TYPE_SET_LORA
     std::map<int, float> set_lora; // mapping adapter ID -> scale
