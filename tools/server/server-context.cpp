@@ -2424,6 +2424,55 @@ private:
 
         const int n_embd_out = llama_model_n_embd_out(model_tgt);
 
+        const auto & group_of_pos   = slot.task->params.pool_group_of_pos;
+        const auto & group_n_tokens = slot.task->params.pool_group_n_tokens;
+        if (!group_n_tokens.empty()) {
+            const size_t n_groups = group_n_tokens.size();
+            std::vector<double>  sums(n_groups * n_embd_out, 0.0);
+            std::vector<int32_t> counts(n_groups, 0);
+
+            for (int i = 0; i < batch.size(); ++i) {
+                if (!batch.tokens[i].output || batch.tokens[i].seq_id != slot.id) {
+                    continue;
+                }
+                const llama_pos pos = batch.tokens[i].pos[0];
+                if (pos < 0 || (size_t) pos >= group_of_pos.size() || group_of_pos[pos] < 0) {
+                    continue;
+                }
+                const int32_t g = group_of_pos[pos];
+                const float * embd = llama_get_embeddings_ith(slot.ctx_tgt, i);
+                if (embd == nullptr) {
+                    send_error(slot, string_format("failed to get the embedding of token %d for \"pool_groups\"", pos));
+                    return;
+                }
+                double * sum = sums.data() + (size_t) g * n_embd_out;
+                for (int d = 0; d < n_embd_out; ++d) {
+                    sum[d] += embd[d];
+                }
+                ++counts[g];
+            }
+
+            std::vector<float> mean(n_embd_out);
+            std::vector<float> out(n_embd_out);
+            for (size_t g = 0; g < n_groups; ++g) {
+                // a token missing from this batch would bias the mean, so fail instead
+                if (counts[g] != group_n_tokens[g]) {
+                    send_error(slot, string_format("\"pool_groups\" group %zu has %d of its %d tokens in the batch", g, counts[g], group_n_tokens[g]));
+                    return;
+                }
+                const double * sum = sums.data() + g * n_embd_out;
+                for (int d = 0; d < n_embd_out; ++d) {
+                    mean[d] = (float) (sum[d] / counts[g]);
+                }
+                common_embd_normalize(mean.data(), out.data(), n_embd_out, slot.task->params.embd_normalize);
+                res->embedding.push_back(out);
+            }
+
+            SLT_DBG(slot, "sending %zu pooled group embeddings\n", n_groups);
+            queue_results.send(std::move(res));
+            return;
+        }
+
         std::vector<float> embd_res(n_embd_out, 0.0f);
 
         for (int i = 0; i < batch.size(); ++i) {
@@ -6806,11 +6855,75 @@ std::unique_ptr<server_res_generator> server_routes::handle_embeddings_impl(cons
         }
     }
 
+    const bool has_pool_groups = body.contains("pool_groups") && !body.at("pool_groups").is_null();
+
     int embd_normalize = params.embd_normalize;
     if (body.count("embd_normalize") != 0) {
         embd_normalize = body.at("embd_normalize").get<int>();
-        if (meta->pooling_type == LLAMA_POOLING_TYPE_NONE) {
+        if (meta->pooling_type == LLAMA_POOLING_TYPE_NONE && !has_pool_groups) {
             SRV_DBG("embd_normalize is not supported by pooling type %d, ignoring it\n", meta->pooling_type);
+        }
+    }
+
+    std::vector<int32_t> pool_group_of_pos;
+    std::vector<int32_t> pool_group_n_tokens;
+    if (has_pool_groups) {
+        if (meta->pooling_type != LLAMA_POOLING_TYPE_NONE) {
+            res->error(format_error_response("\"pool_groups\" requires --pooling none", ERROR_TYPE_INVALID_REQUEST));
+            return res;
+        }
+        if (tokenized_prompts.size() != 1) {
+            res->error(format_error_response("\"pool_groups\" applies to a single prompt", ERROR_TYPE_INVALID_REQUEST));
+            return res;
+        }
+        const server_tokens & prompt_tokens = tokenized_prompts[0];
+        const int32_t n_tokens = (int32_t) prompt_tokens.size();
+        // media chunks are decoded outside the prompt batch and their positions do not map 1:1 to tokens
+        for (int32_t p = 0; p < n_tokens; ++p) {
+            if (prompt_tokens[p] == LLAMA_TOKEN_NULL) {
+                res->error(format_error_response("\"pool_groups\" does not support prompts with media", ERROR_TYPE_INVALID_REQUEST));
+                return res;
+            }
+        }
+        const json & groups = body.at("pool_groups");
+        if (!groups.is_array() || groups.empty()) {
+            res->error(format_error_response("\"pool_groups\" must be a non-empty array of groups", ERROR_TYPE_INVALID_REQUEST));
+            return res;
+        }
+        if (groups.size() > (size_t) n_tokens) {
+            res->error(format_error_response(string_format("\"pool_groups\" has %zu groups, more than the %d tokens of the prompt", groups.size(), n_tokens), ERROR_TYPE_INVALID_REQUEST));
+            return res;
+        }
+        pool_group_of_pos.assign(n_tokens, -1);
+        for (size_t g = 0; g < groups.size(); ++g) {
+            const json & group = groups[g];
+            if (!group.is_array() || group.empty()) {
+                res->error(format_error_response("each \"pool_groups\" group must be a non-empty array of [start, end) ranges", ERROR_TYPE_INVALID_REQUEST));
+                return res;
+            }
+            int32_t n_group_tokens = 0;
+            for (const auto & range : group) {
+                if (!range.is_array() || range.size() != 2 || !range[0].is_number_integer() || !range[1].is_number_integer()) {
+                    res->error(format_error_response("a \"pool_groups\" range must be [start, end)", ERROR_TYPE_INVALID_REQUEST));
+                    return res;
+                }
+                const int64_t start = range[0].get<int64_t>();
+                const int64_t end   = range[1].get<int64_t>();
+                if (start < 0 || end <= start || end > n_tokens) {
+                    res->error(format_error_response(string_format("\"pool_groups\" range [%lld, %lld) is empty or outside the %d-token prompt",
+                                                                   (long long) start, (long long) end, n_tokens), ERROR_TYPE_INVALID_REQUEST));
+                    return res;
+                }
+                for (int64_t p = start; p < end; ++p) {
+                    if (pool_group_of_pos[p] != -1) {
+                        res->error(format_error_response(string_format("\"pool_groups\" token %lld is in more than one range", (long long) p), ERROR_TYPE_INVALID_REQUEST));
+                        return res;
+                    }
+                    pool_group_of_pos[p] = (int32_t) g;
+                }
+                n_group_tokens += (int32_t) (end - start);
+            }
+            pool_group_n_tokens.push_back(n_group_tokens);
         }
     }
 
@@ -6828,6 +6941,8 @@ std::unique_ptr<server_res_generator> server_routes::handle_embeddings_impl(cons
             // OAI-compat
             task.params.res_type = res_type;
             task.params.embd_normalize = embd_normalize;
+            task.params.pool_group_of_pos   = pool_group_of_pos;
+            task.params.pool_group_n_tokens = pool_group_n_tokens;
 
             tasks.push_back(std::move(task));
         }

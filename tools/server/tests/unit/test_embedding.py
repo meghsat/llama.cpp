@@ -345,3 +345,110 @@ def test_embedding_invalid_request(data):
     assert res.status_code == 400
     assert "error" in res.body
     assert res.body["error"]["type"] == "invalid_request_error"
+
+
+POOL_GROUPS_PROMPT = "I believe the meaning of life is"
+
+
+def test_embedding_pool_groups():
+    global server
+    server.pooling = 'none'
+    server.start()
+    res = server.make_request("POST", "/embedding", data={"content": POOL_GROUPS_PROMPT})
+    assert res.status_code == 200
+    rows = res.body[0]['embedding']
+
+    groups = [[[1, 3]], [[3, 4], [5, 7]], [[0, 1]]]
+    res = server.make_request("POST", "/embedding", data={
+        "content": POOL_GROUPS_PROMPT,
+        "pool_groups": groups,
+        "embd_normalize": -1,
+    })
+    assert res.status_code == 200
+    means = res.body[0]['embedding']
+    assert len(means) == len(groups)
+    for group, mean in zip(groups, means):
+        positions = [p for start, end in group for p in range(start, end)]
+        for d in range(len(mean)):
+            expected = sum(rows[p][d] for p in positions) / len(positions)
+            assert abs(mean[d] - expected) < EPSILON
+
+
+def test_embedding_pool_groups_normalized():
+    global server
+    server.pooling = 'none'
+    server.start()
+    res = server.make_request("POST", "/embedding", data={
+        "content": POOL_GROUPS_PROMPT,
+        "pool_groups": [[[1, 3]], [[3, 6]]],
+    })
+    assert res.status_code == 200
+    for mean in res.body[0]['embedding']:
+        assert abs(sum(x ** 2 for x in mean) - 1) < EPSILON
+
+
+@pytest.mark.parametrize(
+    "pool_groups",
+    [
+        [],
+        [[]],
+        [[[0]]],
+        [[[0, "2"]]],
+        [[[-1, 2]]],
+        [[[2, 2]]],
+        [[[0, 1000]]],
+        [[[0, 3]], [[2, 4]]],
+        [[[0, 3], [1, 2]]],
+        [[[0, 1]]] * 1000,
+    ]
+)
+def test_embedding_pool_groups_invalid(pool_groups):
+    global server
+    server.pooling = 'none'
+    server.start()
+    res = server.make_request("POST", "/embedding", data={
+        "content": POOL_GROUPS_PROMPT,
+        "pool_groups": pool_groups,
+    })
+    assert res.status_code == 400
+    assert res.body["error"]["type"] == "invalid_request_error"
+
+
+def test_embedding_pool_groups_multiple_prompts():
+    global server
+    server.pooling = 'none'
+    server.start()
+    res = server.make_request("POST", "/embedding", data={
+        "content": [POOL_GROUPS_PROMPT, POOL_GROUPS_PROMPT],
+        "pool_groups": [[[0, 2]]],
+    })
+    assert res.status_code == 400
+
+
+@pytest.mark.parametrize("pooling", ["none", "mean"])
+def test_embedding_pool_groups_null(pooling):
+    global server
+    server.pooling = pooling
+    server.start()
+    res = server.make_request("POST", "/embedding", data={"content": POOL_GROUPS_PROMPT})
+    assert res.status_code == 200
+    res_null = server.make_request("POST", "/embedding", data={
+        "content": POOL_GROUPS_PROMPT,
+        "pool_groups": None,
+    })
+    assert res_null.status_code == 200
+    rows, rows_null = res.body[0]['embedding'], res_null.body[0]['embedding']
+    assert len(rows_null) == len(rows)
+    for row, row_null in zip(rows, rows_null):
+        assert max(abs(a - b) for a, b in zip(row, row_null)) < EPSILON
+
+
+def test_embedding_pool_groups_requires_pooling_none():
+    global server
+    server.pooling = 'mean'
+    server.start()
+    res = server.make_request("POST", "/embedding", data={
+        "content": POOL_GROUPS_PROMPT,
+        "pool_groups": [[[0, 2]]],
+    })
+    assert res.status_code == 400
