@@ -263,6 +263,10 @@ bool llama_batch_allocr::init(
             decision_group.resize(n_tok, 0);
             decision_group[i] = batch_inp.tokens[i].decision_group;
         }
+        if (batch_inp.tokens[i].pool_group != 0) {
+            pool_group.resize(n_tok, 0);
+            pool_group[i] = batch_inp.tokens[i].pool_group;
+        }
     }
 
     //
@@ -358,6 +362,7 @@ bool llama_batch_allocr::init(
             /*.type         =*/ is_embd_vec.empty() ? nullptr : is_embd_vec.data(),
             /*.decision_order =*/ decision_order.empty() ? nullptr : decision_order.data(),
             /*.decision_group =*/ decision_group.empty() ? nullptr : decision_group.data(),
+            /*.pool_group     =*/ pool_group.empty() ? nullptr : pool_group.data(),
             /*.data         =*/ {},
         };
 
@@ -585,6 +590,7 @@ llama_ubatch llama_batch_allocr::ubatch_reserve(uint32_t n_seq_tokens, uint32_t 
         /*.type         =*/ nullptr,
         /*.decision_order =*/ nullptr,
         /*.decision_group =*/ nullptr,
+        /*.pool_group     =*/ nullptr,
         /*.data         =*/ std::move(udata),
     };
 
@@ -894,6 +900,7 @@ void llama_batch_allocr::clear() {
     output      .clear();
     decision_order.clear();
     decision_group.clear();
+    pool_group.clear();
 
     for (auto & cur : seq_pos) {
         cur.clear();
@@ -951,6 +958,7 @@ llama_ubatch llama_batch_allocr::ubatch_add(const std::vector<int32_t> & idxs, u
     udata->type      .resize(mixed ? n_tokens : 0);
     udata->decision_order.resize(decision_order.empty() ? 0 : n_tokens);
     udata->decision_group.resize(decision_group.empty() ? 0 : n_tokens);
+    udata->pool_group    .resize(pool_group.empty()     ? 0 : n_tokens);
 
     udata->batch_idxs = idxs;
     udata->seq_id_data.reserve(n_tokens);
@@ -994,6 +1002,9 @@ llama_ubatch llama_batch_allocr::ubatch_add(const std::vector<int32_t> & idxs, u
         }
         if (!decision_group.empty()) {
             udata->decision_group[i] = decision_group[idxs[i]];
+        }
+        if (!pool_group.empty()) {
+            udata->pool_group[i] = pool_group[idxs[i]];
         }
 
         for (int s = 0; s < udata->n_seq_id[i]; ++s) {
@@ -1042,6 +1053,7 @@ llama_ubatch llama_batch_allocr::ubatch_add(const std::vector<int32_t> & idxs, u
         /*.type         =*/ mixed ? udata->type.data() : nullptr,
         /*.decision_order =*/ udata->decision_order.empty() ? nullptr : udata->decision_order.data(),
         /*.decision_group =*/ udata->decision_group.empty() ? nullptr : udata->decision_group.data(),
+        /*.pool_group     =*/ udata->pool_group.empty()     ? nullptr : udata->pool_group.data(),
         /*.data         =*/ std::move(udata),
     };
 
@@ -1450,6 +1462,14 @@ bool llama_batch_ext::set_decision_group(int32_t idx, int32_t group) {
     return true;
 }
 
+bool llama_batch_ext::set_pool_group(int32_t idx, int32_t group) {
+    if (idx < 0 || idx >= (int32_t) tokens.size() || group < 0) {
+        return false;
+    }
+    tokens[idx].pool_group = group;
+    return true;
+}
+
 // llama_batch_ext C API
 
 llama_batch_ext * llama_batch_ext_init(llama_context * ctx) {
@@ -1535,6 +1555,10 @@ bool llama_batch_ext_set_decision_order(llama_batch_ext * batch, int32_t idx, ll
 
 bool llama_batch_ext_set_decision_group(llama_batch_ext * batch, int32_t idx, int32_t group) {
     return batch->set_decision_group(idx, group);
+}
+
+bool llama_batch_ext_set_pool_group(llama_batch_ext * batch, int32_t idx, int32_t group) {
+    return batch->set_pool_group(idx, group);
 }
 
 // llama_batch_compat

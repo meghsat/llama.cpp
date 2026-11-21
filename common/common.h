@@ -1121,6 +1121,7 @@ struct common_batch {
         std::vector<llama_seq_id> seq_ids_extra; // see add_seq()
         int32_t      decision_order = 0; // see llama_batch_ext_set_decision_order()
         int32_t      decision_group = 0; // see llama_batch_ext_set_decision_group()
+        int32_t      pool_group     = 0; // see llama_batch_ext_set_pool_group()
         int32_t      embd_row = -1; // see add_embd_row(), -1 if none
         int32_t      state_row = -1; // see set_embd_state_row(), -1 if none
     };

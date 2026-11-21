@@ -14,6 +14,7 @@
 
 #include <array>
 #include <map>
+#include <set>
 #include <vector>
 
 struct llama_model;
@@ -87,6 +88,7 @@ struct llama_context {
     float * get_embeddings();
     float * get_embeddings_ith(int32_t i);
     float * get_embeddings_seq(llama_seq_id seq_id);
+    float * get_embeddings_pool_groups(llama_seq_id seq_id, int32_t * n_groups);
 
     float * get_embeddings_nextn();
     float * get_embeddings_nextn_ith(int32_t i);
@@ -296,6 +298,9 @@ private:
 
     llm_graph_cb graph_get_cb() const;
 
+    // returns true when every sequence of the ubatch has pool groups
+    bool extract_pool_groups(const llm_graph_result * res, const llama_ubatch & ubatch);
+
     // parameters defining the backend scheduler instance
     struct sched_params {
         size_t max_nodes  = 0;
@@ -385,6 +390,13 @@ private:
     // sequence embeddings output (map of [n_embd] vectors)
     // populated only when pooling_type != LLAMA_POOLING_TYPE_NONE
     std::map<llama_seq_id, std::vector<float>> embd_seq;
+
+    // pool group means (map of [n_groups*n_embd] vectors), see llama_batch_ext_set_pool_group()
+    std::map<llama_seq_id, std::vector<float>> embd_groups;
+
+    // sequences of the last decode with invalid pool groups; kept apart from embd_groups so that no vector is
+    // freed while an async copy of an earlier ubatch may still write into it
+    std::set<llama_seq_id> embd_groups_invalid;
 
     // reuse the batch_allocr to avoid unnecessary memory allocations
     std::unique_ptr<llama_batch_allocr> balloc;

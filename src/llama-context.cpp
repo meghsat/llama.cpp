@@ -1196,6 +1196,60 @@ float * llama_context::get_embeddings_seq(llama_seq_id seq_id) {
     return it->second.data();
 }
 
+float * llama_context::get_embeddings_pool_groups(llama_seq_id seq_id, int32_t * n_groups) {
+    auto it = embd_groups.find(seq_id);
+    if (it == embd_groups.end() || embd_groups_invalid.count(seq_id) != 0) {
+        if (n_groups) {
+            *n_groups = 0;
+        }
+        return nullptr;
+    }
+
+    if (n_groups) {
+        *n_groups = (int32_t) (it->second.size() / model.hparams.n_embd_out());
+    }
+    return it->second.data();
+}
+
+bool llama_context::extract_pool_groups(const llm_graph_result * res, const llama_ubatch & ubatch) {
+    ggml_tensor * t_groups = res->get_embd_groups();
+    if (t_groups == nullptr) {
+        return false;
+    }
+
+    const llama_pool_group_counts counts(ubatch);
+
+    ggml_backend_t backend = ggml_backend_sched_get_tensor_backend(sched.get(), t_groups);
+    GGML_ASSERT(backend != nullptr);
+
+    const uint32_t n_embd_out = model.hparams.n_embd_out();
+
+    bool    all_grouped = true;
+    int64_t col         = 0;
+    for (uint32_t s = 0; s < ubatch.n_seqs_unq; ++s) {
+        const llama_seq_id seq_id   = ubatch.seq_id_unq[s];
+        const int64_t      n_groups = (int64_t) counts.n_tokens[s].size();
+        if (n_groups == 0) {
+            all_grouped = false;
+            continue;
+        }
+
+        // a sequence split over ubatches would have partial means in each one
+        if (!counts.valid[s] || embd_groups.count(seq_id) != 0 || embd_groups_invalid.count(seq_id) != 0) {
+            if (embd_groups_invalid.insert(seq_id).second) {
+                LLAMA_LOG_ERROR("%s: seq_id %d: pool groups must be non-empty, in one ubatch, and in no other sequence\n", __func__, seq_id);
+            }
+        } else {
+            auto & out = embd_groups[seq_id];
+            out.resize(n_groups*n_embd_out);
+            ggml_backend_tensor_get_async(backend, t_groups, out.data(), col*n_embd_out*sizeof(float), n_groups*n_embd_out*sizeof(float));
+        }
+        col += n_groups;
+    }
+
+    return all_grouped;
+}
+
 float * llama_context::get_embeddings_nextn() {
     output_reorder();
 
@@ -1942,10 +1996,12 @@ int llama_context::encode(const llama_batch_ext & batch_inp) {
 
     // TODO: this clear of the buffer can easily be forgotten - need something better
     // sync first so any in-flight async copies into embd_seq complete before it is freed
-    if (!embd_seq.empty()) {
+    if (!embd_seq.empty() || !embd_groups.empty()) {
         synchronize();
     }
     embd_seq.clear();
+    embd_groups.clear();
+    embd_groups_invalid.clear();
 
     if (t_compute_start_us == 0) {
         t_compute_start_us = ggml_time_us();
@@ -2012,6 +2068,10 @@ int llama_context::encode(const llama_batch_ext & batch_inp) {
         switch (cparams.pooling_type) {
             case LLAMA_POOLING_TYPE_NONE:
                 {
+                    if (extract_pool_groups(res, ubatch)) {
+                        break;
+                    }
+
                     // extract token embeddings
                     GGML_ASSERT(embd.data != nullptr);
                     const uint32_t n_embd_out = hparams.n_embd_out();
@@ -2243,10 +2303,12 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
 
     // TODO: this clear of the buffer can easily be forgotten - need something better
     // sync first so any in-flight async copies into embd_seq complete before it is freed
-    if (!embd_seq.empty()) {
+    if (!embd_seq.empty() || !embd_groups.empty()) {
         synchronize();
     }
     embd_seq.clear();
+    embd_groups.clear();
+    embd_groups_invalid.clear();
 
     if (t_compute_start_us == 0) {
         t_compute_start_us = ggml_time_us();
@@ -2446,6 +2508,10 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
             switch (cparams.pooling_type) {
                 case LLAMA_POOLING_TYPE_NONE:
                     {
+                        if (extract_pool_groups(res, ubatch)) {
+                            break;
+                        }
+
                         // extract token embeddings
                         GGML_ASSERT(embd.data != nullptr);
                         const uint32_t n_embd_out = hparams.n_embd_out();
@@ -4303,6 +4369,8 @@ void llama_context::opt_epoch_iter(
         n_queued_tokens += n_tokens_all;
 
         embd_seq.clear();
+        embd_groups.clear();
+        embd_groups_invalid.clear();
 
         uint32_t n_outputs_all = n_tokens_all;
 
@@ -4733,6 +4801,12 @@ float * llama_get_embeddings_seq(llama_context * ctx, llama_seq_id seq_id) {
     ctx->synchronize();
 
     return ctx->get_embeddings_seq(seq_id);
+}
+
+float * llama_get_embeddings_pool_groups(llama_context * ctx, llama_seq_id seq_id, int32_t * n_groups) {
+    ctx->synchronize();
+
+    return ctx->get_embeddings_pool_groups(seq_id, n_groups);
 }
 
 void llama_set_embeddings_nextn(llama_context * ctx, bool value, bool masked) {

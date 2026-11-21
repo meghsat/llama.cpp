@@ -143,6 +143,16 @@ LLAMA_API bool llama_batch_ext_set_decision_order(struct llama_batch_ext * batch
 // 0 (default) is the state, k > 0 the k-th question; full attention layers hide other questions from a question
 LLAMA_API bool llama_batch_ext_set_decision_group(struct llama_batch_ext * batch, int32_t idx, int32_t group);
 
+// Mean-pools groups of entries of a sequence in the graph, for contexts with LLAMA_POOLING_TYPE_NONE
+// 0 (default) is no group, k > 0 the k-th group of the entry's sequence
+// Groups 1..n of a sequence must be non-empty and in one ubatch, see llama_get_embeddings_pool_groups()
+LLAMA_API bool llama_batch_ext_set_pool_group(struct llama_batch_ext * batch, int32_t idx, int32_t group);
+
+// Group means of a sequence from the last decode, float[n_groups*n_embd], group k at row k-1
+// Returns NULL if the sequence has no pool groups or its groups are not valid
+// The token embeddings of a ubatch in which every sequence has pool groups are not extracted
+LLAMA_API float * llama_get_embeddings_pool_groups(struct llama_context * ctx, llama_seq_id seq_id, int32_t * n_groups);
+
 // Label of option i of a decision model ("<arch>.decision.labels"), nullptr past the last one
 LLAMA_API const char * llama_model_decision_label(const struct llama_model * model, uint32_t i);
 

@@ -2342,6 +2342,9 @@ llama_batch_ext * common_batch::get_sub_batch(int32_t off, int32_t n) {
         if (t.decision_group != 0 && !llama_batch_ext_set_decision_group(res, idx, t.decision_group)) {
             GGML_ABORT("%s: failed to set the decision group of the entry at index %d\n", __func__, i);
         }
+        if (t.pool_group != 0 && !llama_batch_ext_set_pool_group(res, idx, t.pool_group)) {
+            GGML_ABORT("%s: failed to set the pool group of the entry at index %d\n", __func__, i);
+        }
     }
 
     return res;

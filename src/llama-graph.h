@@ -99,6 +99,15 @@ struct llama_cross {
     std::vector<std::set<llama_seq_id>> seq_ids_enc;
 };
 
+// pool groups of each sequence of a ubatch, in seq_id_unq order, see llama_batch_ext_set_pool_group()
+struct llama_pool_group_counts {
+    std::vector<std::vector<int32_t>> n_tokens; // output entries in each group, empty for a sequence without groups
+    std::vector<bool>                 valid;    // every group is non-empty and no grouped entry has another sequence
+    int64_t                           n_groups = 0; // all groups of the ubatch
+
+    explicit llama_pool_group_counts(const llama_ubatch & ubatch);
+};
+
 struct llm_graph_params;
 
 //
@@ -293,6 +302,16 @@ public:
     ggml_tensor * mean; // F32 [n_batch, n_batch]
 
     const llama_cparams cparams;
+};
+
+class llm_graph_input_pool_groups : public llm_graph_input_i {
+public:
+    llm_graph_input_pool_groups() = default;
+    virtual ~llm_graph_input_pool_groups() = default;
+
+    void set_input(const llama_ubatch * ubatch) override;
+
+    ggml_tensor * weights; // F32 [n_outputs, n_groups]
 };
 
 class llm_graph_input_cls : public llm_graph_input_i {
@@ -869,7 +888,8 @@ struct llm_graph_params {
                 (ubatch.token && other.ubatch.token && ubatch.embd && other.ubatch.embd)
             ) &&
             (!ubatch.embd_state == !other.ubatch.embd_state) &&
-            (!ubatch.embd_row   == !other.ubatch.embd_row);
+            (!ubatch.embd_row   == !other.ubatch.embd_row) &&
+            (!ubatch.pool_group == !other.ubatch.pool_group);
 
         // when we split the batch using "equal_seqs" we have to verify that the participating sequences are the same
         //   the reason is because the set of attention streams would be different for different sequences
@@ -949,6 +969,7 @@ public:
     ggml_tensor * get_logits()      const { return t_logits; }
     ggml_tensor * get_embd()        const { return t_embd; }
     ggml_tensor * get_embd_pooled() const { return t_embd_pooled; }
+    ggml_tensor * get_embd_groups() const { return t_embd_groups; }
     ggml_tensor * get_h_nextn()     const { return t_h_nextn; }
 
     ggml_tensor * get_layer_inp(int il) const { return t_layer_inp[il]; }
@@ -990,6 +1011,7 @@ public:
     ggml_tensor * t_logits      = nullptr;
     ggml_tensor * t_embd        = nullptr;
     ggml_tensor * t_embd_pooled = nullptr;
+    ggml_tensor * t_embd_groups = nullptr; // [n_embd_out, n_groups], see llama_batch_ext_set_pool_group()
     ggml_tensor * t_h_nextn     = nullptr; // [n_embd, n_outputs] hidden state before final output norm
 
     std::vector<ggml_tensor *> t_layer_inp;
@@ -1537,6 +1559,8 @@ struct llm_graph_context {
             ggml_tensor * dense_2,
             ggml_tensor * dense_2_b,
             ggml_tensor * dense_3) const;
+
+    void build_pool_groups() const;
 };
 
 // TODO: better name

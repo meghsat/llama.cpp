@@ -430,6 +430,71 @@ bool llm_graph_input_moe_ids::can_reuse(const llm_graph_params & params) {
     return res;
 }
 
+llama_pool_group_counts::llama_pool_group_counts(const llama_ubatch & ubatch) {
+    n_tokens.resize(ubatch.n_seqs_unq);
+    valid.assign(ubatch.n_seqs_unq, true);
+    if (ubatch.pool_group == nullptr) {
+        return;
+    }
+
+    for (uint32_t i = 0; i < ubatch.n_tokens; ++i) {
+        const int32_t g = ubatch.pool_group[i];
+        if (g <= 0 || !ubatch.output[i]) {
+            continue;
+        }
+        const int32_t s = ubatch.seq_idx[ubatch.seq_id[i][0]];
+        if (ubatch.n_seq_id[i] != 1) {
+            valid[s] = false;
+        }
+        if ((int32_t) n_tokens[s].size() < g) {
+            n_tokens[s].resize(g, 0);
+        }
+        n_tokens[s][g - 1]++;
+    }
+
+    for (uint32_t s = 0; s < ubatch.n_seqs_unq; ++s) {
+        for (const int32_t n : n_tokens[s]) {
+            if (n == 0) {
+                valid[s] = false;
+            }
+        }
+        n_groups += (int64_t) n_tokens[s].size();
+    }
+}
+
+void llm_graph_input_pool_groups::set_input(const llama_ubatch * ubatch) {
+    GGML_ASSERT(weights);
+    GGML_ASSERT(ggml_backend_buffer_is_host(weights->buffer));
+
+    const llama_pool_group_counts counts(*ubatch);
+
+    const int64_t n_outputs = weights->ne[0];
+    GGML_ASSERT(counts.n_groups == weights->ne[1]);
+
+    float * data = (float *) weights->data;
+    std::fill(data, data + n_outputs*counts.n_groups, 0.0f);
+
+    std::vector<int64_t> col0(ubatch->n_seqs_unq, 0);
+    for (uint32_t s = 1; s < ubatch->n_seqs_unq; ++s) {
+        col0[s] = col0[s - 1] + (int64_t) counts.n_tokens[s - 1].size();
+    }
+
+    // weight 1/n, so that the product with the token embeddings is the mean of each group
+    int64_t j = 0;
+    for (uint32_t i = 0; i < ubatch->n_tokens; ++i) {
+        if (!ubatch->output[i]) {
+            continue;
+        }
+        const int32_t g = ubatch->pool_group[i];
+        if (g > 0) {
+            const int32_t s = ubatch->seq_idx[ubatch->seq_id[i][0]];
+            data[(col0[s] + g - 1)*n_outputs + j] = 1.0f/float(counts.n_tokens[s][g - 1]);
+        }
+        ++j;
+    }
+    GGML_ASSERT(j == n_outputs);
+}
+
 void llm_graph_input_mean::set_input(const llama_ubatch * ubatch) {
     if (cparams.embeddings   &&
        (cparams.pooling_type == LLAMA_POOLING_TYPE_MEAN ||
@@ -1462,6 +1527,7 @@ void llm_graph_result::reset() {
     t_logits      = nullptr;
     t_embd        = nullptr;
     t_embd_pooled = nullptr;
+    t_embd_groups = nullptr;
     t_h_nextn     = nullptr;
 
     t_layer_inp.resize(LLAMA_MAX_LAYERS + 1);
@@ -1513,6 +1579,9 @@ void llm_graph_result::set_outputs(const llm_graph_params & params) {
     }
     if (t_embd_pooled != nullptr) {
         ggml_set_output(t_embd_pooled);
+    }
+    if (t_embd_groups != nullptr) {
+        ggml_set_output(t_embd_groups);
     }
     if (t_h_nextn != nullptr) {
         ggml_set_output(t_h_nextn);
@@ -4359,6 +4428,40 @@ void llm_graph_context::build_dense_out(
     ggml_build_forward_expand(gf, cur);
 }
 
+
+void llm_graph_context::build_pool_groups() const {
+    if (!cparams.embeddings || pooling_type != LLAMA_POOLING_TYPE_NONE || ubatch.pool_group == nullptr) {
+        return;
+    }
+
+    const llama_pool_group_counts counts(ubatch);
+    if (counts.n_groups == 0) {
+        return;
+    }
+
+    // after the dense projections, which are affine and so commute with the mean
+    ggml_tensor * cur = res->t_embd_pooled != nullptr ? res->t_embd_pooled : res->t_embd;
+    GGML_ASSERT(cur != nullptr && "missing t_embd_pooled/t_embd");
+
+    auto inp = std::make_unique<llm_graph_input_pool_groups>();
+
+    inp->weights = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, cur->ne[1], counts.n_groups);
+    ggml_set_input(inp->weights);
+    ggml_set_name(inp->weights, "pool_groups");
+
+    ggml_tensor * weights = inp->weights;
+    res->add_input(std::move(inp));
+
+    const int64_t n_embd_cur = cur->ne[0];
+
+    // one column per batch: a backend may run a matrix product with many columns in F16
+    weights = ggml_reshape_3d(ctx0, weights, weights->ne[0], 1, counts.n_groups);
+    cur = ggml_mul_mat(ctx0, ggml_cont(ctx0, ggml_transpose(ctx0, cur)), weights);
+    cur = ggml_reshape_2d(ctx0, cur, n_embd_cur, counts.n_groups);
+    cb(cur, "result_embd_groups", -1);
+    res->t_embd_groups = cur;
+    ggml_build_forward_expand(gf, cur);
+}
 
 void llm_graph_context::build_pooling(
         ggml_tensor * cls,

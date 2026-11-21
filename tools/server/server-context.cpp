@@ -17,6 +17,7 @@
 #include "common.h"
 #include "fit.h"
 #include "llama.h"
+#include "../../src/llama-ext.h" // staging API: llama_get_embeddings_pool_groups
 #include "log.h"
 #include "sampling.h"
 #include "speculative.h"
@@ -160,6 +161,7 @@ struct server_batch {
         bool is_prompt; // for stats tracking
         int32_t decision_order = 0;
         int32_t decision_group = 0;
+        int32_t pool_group = 0;
         int32_t i_embd = -1; // row in embd, -1 if this is a token
     };
     std::vector<token> tokens;
@@ -245,6 +247,11 @@ struct server_batch {
         tokens[idx].decision_group = group;
     }
 
+    void set_pool_group(int32_t idx, int32_t group) {
+        GGML_ASSERT(idx >= 0 && idx < (int32_t)tokens.size());
+        tokens[idx].pool_group = group;
+    }
+
     // render the sub-batch [off, off + n_tokens) into view, index i in view is index off + i here
     void render(int32_t off, int32_t n_tokens) {
         GGML_ASSERT(off >= 0 && off < size());
@@ -260,6 +267,7 @@ struct server_batch {
             }
             view.tokens.back().decision_order = t.decision_order;
             view.tokens.back().decision_group = t.decision_group;
+            view.tokens.back().pool_group     = t.pool_group;
         }
     }
 };
@@ -2424,47 +2432,18 @@ private:
 
         const int n_embd_out = llama_model_n_embd_out(model_tgt);
 
-        const auto & group_of_pos   = slot.task->pool_groups.group_of_pos;
         const auto & group_n_tokens = slot.task->pool_groups.n_tokens;
         if (!group_n_tokens.empty()) {
-            const size_t n_groups = group_n_tokens.size();
-            std::vector<double>  sums(n_groups * n_embd_out, 0.0);
-            std::vector<int32_t> counts(n_groups, 0);
-
-            for (int i = 0; i < batch.size(); ++i) {
-                if (!batch.tokens[i].output || batch.tokens[i].seq_id != slot.id) {
-                    continue;
-                }
-                const llama_pos pos = batch.tokens[i].pos[0];
-                if (pos < 0 || (size_t) pos >= group_of_pos.size() || group_of_pos[pos] < 0) {
-                    continue;
-                }
-                const int32_t g = group_of_pos[pos];
-                const float * embd = llama_get_embeddings_ith(slot.ctx_tgt, i);
-                if (embd == nullptr) {
-                    send_error(slot, string_format("failed to get the embedding of token %d for \"pool_groups\"", pos));
-                    return;
-                }
-                double * sum = sums.data() + (size_t) g * n_embd_out;
-                for (int d = 0; d < n_embd_out; ++d) {
-                    sum[d] += embd[d];
-                }
-                ++counts[g];
+            int32_t n_groups = 0;
+            const float * means = llama_get_embeddings_pool_groups(slot.ctx_tgt, slot.id, &n_groups);
+            if (means == nullptr || n_groups != (int32_t) group_n_tokens.size()) {
+                send_error(slot, string_format("failed to pool the %zu \"pool_groups\" groups, the prompt must fit in one ubatch", group_n_tokens.size()));
+                return;
             }
 
-            std::vector<float> mean(n_embd_out);
             std::vector<float> out(n_embd_out);
-            for (size_t g = 0; g < n_groups; ++g) {
-                // a token missing from this batch would bias the mean, so fail instead
-                if (counts[g] != group_n_tokens[g]) {
-                    send_error(slot, string_format("\"pool_groups\" group %zu has %d of its %d tokens in the batch", g, counts[g], group_n_tokens[g]));
-                    return;
-                }
-                const double * sum = sums.data() + g * n_embd_out;
-                for (int d = 0; d < n_embd_out; ++d) {
-                    mean[d] = (float) (sum[d] / counts[g]);
-                }
-                common_embd_normalize(mean.data(), out.data(), n_embd_out, slot.task->params.embd_normalize);
+            for (int32_t g = 0; g < n_groups; ++g) {
+                common_embd_normalize(means + (size_t) g * n_embd_out, out.data(), n_embd_out, slot.task->params.embd_normalize);
                 res->embedding.push_back(out);
             }
 
@@ -4490,6 +4469,9 @@ private:
                         if (!slot.task->decision.group.empty()) {
                             batch.set_decision_group(batch.size() - 1, slot.task->decision.group[slot.prompt.n_tokens()]);
                         }
+                        if (!slot.task->pool_groups.group_of_pos.empty()) {
+                            batch.set_pool_group(batch.size() - 1, slot.task->pool_groups.group_of_pos[slot.prompt.n_tokens()] + 1);
+                        }
                         slot.prompt.tokens.push_back(cur_tok);
 
                         // break at the last user message, or at user messages at least min step past the last checkpoint
@@ -4622,6 +4604,9 @@ private:
                 }
                 if (!slot.task->decision.group.empty()) {
                     batch.set_decision_group(batch.size() - 1, slot.task->decision.group[cur_token_idx]);
+                }
+                if (!slot.task->pool_groups.group_of_pos.empty()) {
+                    batch.set_pool_group(batch.size() - 1, slot.task->pool_groups.group_of_pos[cur_token_idx] + 1);
                 }
                 slot.prompt.tokens.push_back(cur_tok);
                 continue;

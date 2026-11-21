@@ -3569,6 +3569,8 @@ ggml_cgraph * llama_model::build_graph(const llm_graph_params & params) const {
     // TODO: move reranking logic here and generalize
     llm->build_dense_out(dense_2_out_layers, dense_2_out_layers_b, dense_3_out_layers);
 
+    llm->build_pool_groups();
+
     llm->build_layer_inp_dev();
 
     llm->build_h_nextn_dev();
